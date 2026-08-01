@@ -65,7 +65,7 @@ De Luca, *Robotics 1: Inverse kinematics*).
 
 ```sh
 cc -std=c99 -Wall -Wextra -Werror -pedantic tests/test_sakin.c -lm -o test_sakin
-./test_sakin        # 19 checks, 0 failures
+./test_sakin        # 25 checks, 0 failures
 ```
 
 `tests/cpp_compile_check.cpp` verifies C++ builds (Arduino/ESP32);
