@@ -20,7 +20,11 @@
       SAKIN_MAX_LEGS ... context array capacity, default 6. Set to 4 for a
                          quadruped to shrink sakin_t, then fill the mounts
                          and gait tables yourself (the defaults are the
-                         built-in 6-leg set).
+                         built-in 6-leg set). Must be defined identically in
+                         every translation unit -- it changes struct layout.
+                         For other leg counts (4/8/...) see "Customizing for
+                         N Legs" in the README, including ready-made mounts
+                         and gait-table examples.
 
       SAKIN_NO_GAIT .... leave out the gait engine, keeping only the core
                          leg IK/FK (mode 1 below).
