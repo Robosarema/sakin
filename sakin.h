@@ -84,6 +84,23 @@
                      femur = -beta (the URDF +Y axis pitches the link down),
                      tibia = +kappa (knee fold from straight, always >= 0).
 
+   One leg, side view in the (radial, Z) plane (coxa frame, +X radial out):
+
+        +Z  (up)
+        ^
+        |        beta>0 points the femur up, femur = -beta
+        |       _
+        |      /| femur            (elbow_up: knee above the r-axis line,
+        |     / |                    insect posture; elbow_down mirrors it)
+        |    /__\
+        |        kappa = fold of the tibia from straight, always >= 0
+        |         |
+        +-------->--------+X radial outward
+       (coxa)
+        gamma is the coxa yaw about +Z; a point p in the coxa frame is at
+        radius r = |p| - coxa_len, so the reach annulus is measured from the
+        coxa joint, not the body axis (De Luca WS1).
+
    Leg IK:
 
       Geometric method (Craig, "Introduction to Robotics", 3rd ed., ch. 4.4):
@@ -98,11 +115,14 @@
 
       and then saturated at the joint limits (Craig 4.2 / De Luca Robotics 1:
       a goal outside the workspace has no solution; a servo should still get
-      the closest safe one). The return value tells you when this happened:
+      the closest safe one -- Craig 4.2 raises exactly this "nearest
+      attainable goal frame" question for under-actuated chains, and this is
+      its answer). The return value tells you when this happened:
 
          SAKIN_IK_OK ................ exact solution
          SAKIN_IK_CLIPPED_WORKSPACE . target was outside the annulus
          SAKIN_IK_CLIPPED_JOINTS .... a joint hit its configured limit
+         SAKIN_IK_BAD_CONFIG ........ cfg has a zero/negative link length
 
       A positioning leg has two solutions (elbow up/down). The branch is
       fixed by the hardware, so it lives in cfg.elbow_up, not in the call.
@@ -128,7 +148,8 @@
       sakin_gait_select freezes the current offsets into the interpolation
       state, so switching gait mid-walk never teleports a foot. When the
       velocity command drops below the deadbands, the offsets decay to zero
-      over cfg.settle_time seconds and the robot stands at its nominal pose.
+      exponentially (time constant cfg.settle_time, hard-zeroed once each
+      component is below 0.5 mm) and the robot stands at its nominal pose.
 
       The gait tables (leg phase order, push steps, cycle steps, step time)
       are the exact NUKE values proven on the real robot, exposed through
@@ -204,6 +225,7 @@ typedef float sakin_real_t;
 #define SAKIN_IK_OK 0
 #define SAKIN_IK_CLIPPED_WORKSPACE 1 // target out of reach, projected to boundary
 #define SAKIN_IK_CLIPPED_JOINTS 2    // a joint hit its configured limit
+#define SAKIN_IK_BAD_CONFIG 4        // degenerate cfg (e.g. zero link length)
 
 // jump phases (sakin_jump_phase)
 #define SAKIN_JUMP_NONE 0
@@ -258,7 +280,9 @@ typedef struct {
   // velocity deadbands + settle behaviour
   sakin_real_t deadband_lin; // mm/s below which the robot counts as still
   sakin_real_t deadband_rot; // rad/s below which the robot counts as still
-  sakin_real_t settle_time;  // s for offsets to decay to stand when still
+  sakin_real_t settle_time;  // s: EXPONENTIAL decay time constant (not a
+                             // deadline) -- offsets shrink by e-fold every
+                             // settle_time s and are hard-zeroed below 0.5 mm
 
   sakin_mount_t mounts[SAKIN_MAX_LEGS];
   sakin_gait_params_t gaits[SAKIN_GAIT_COUNT];
@@ -414,7 +438,9 @@ static const sakin_mount_t sakin__default_mounts[6] = {
   { 0.0f, 55.0f, -20.0f, 1.57079633f }      // LM: yaw   90 deg
 };
 
-// NUKE leg_no sequences per gait, EXACT values proven on the real robot
+// NUKE leg_no sequences per gait, EXACT values proven on the real robot.
+// leg_no[l] = step index (0..steps_in_cycle-1) at which leg l enters swing;
+// entry 0 in each row is the first leg to step, matching the R/L order
 static const int sakin__default_leg_no[SAKIN_GAIT_COUNT][6] = {
   { 0, 8, 6, 2, 10, 4 }, // RIPPLE
   { 4, 8, 6, 0, 10, 2 }, // RIPPLE_LEFT
@@ -490,6 +516,14 @@ sakin_leg_ik(const sakin_config_t* cfg, sakin_vec3_t target, sakin_leg_angles_t*
   const sakin_real_t eps = (sakin_real_t)1e-6;
   int status = SAKIN_IK_OK;
   sakin_real_t gamma, r, d, d_lo, d_hi, alpha, cos_b, beta, cos_p, kappa, femur;
+
+  // degenerate configs would make the law-of-cosines denominators below
+  // zero (0/0 -> NaN); report BAD_CONFIG and return a safe zero pose so the
+  // "never returns NaN" contract holds for every input
+  if (lf <= (sakin_real_t)0 || lt <= (sakin_real_t)0) {
+    out->coxa = out->femur = out->tibia = 0;
+    return SAKIN_IK_BAD_CONFIG;
+  }
 
   gamma = SAKIN__ATAN2(target.y, target.x);             // coxa yaw
   r = SAKIN__HYPOT(target.x, target.y) - cfg->coxa_len; // radial reach
@@ -636,8 +670,14 @@ static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
     // swing apex: foot lifted, centred over the nominal foothold
     t = sakin__vec3(0, 0, c->lift_height);
   } else if (s->step == (swing_step + 1) % s->steps_in_cycle && s->next[leg].z > 1.0f) {
-    // touch down ahead: translation stride + exact rotation share
+    // touch down ahead: translation stride + exact rotation share.
+    // next[leg].z > 1.0f means the leg was airborne (its last target was the
+    // swing apex), so the step just completed was its swing step.
     sakin_real_t k = s->cycle_time * s->push_steps / (2.0f * s->steps_in_cycle);
+    // k = HALF the stance-phase duration. The foot is placed v*k ahead at
+    // touchdown so that, dragging back at -v through the whole stance, it
+    // sweeps a symmetric +k..-k arc about the endpoint and returns to the
+    // same world spot every cycle (push_steps = stance duration in steps).
     sakin_real_t ang = s->omega * k;
     sakin_real_t ca = SAKIN__COS(ang), sa = SAKIN__SIN(ang);
     sakin_vec3_t ep = s->endpoints[leg];

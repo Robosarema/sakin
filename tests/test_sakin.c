@@ -3,8 +3,10 @@
  * Covers the critical tier (100% per test-coverage standards):
  *   - leg IK/FK roundtrip over the workspace (both elbow branches)
  *   - reachability status (Craig §4.2 existence check)
+ *   - inside-coxa-cylinder region (quadrant-safe atan2, Craig §4.4)
+ *   - degenerate config safety (never-NaN contract)
+ *   - body compensation (roll/pitch/yaw), standing pose, jump lifecycle
  *   - gait engine sanity + gait-transition continuity
- *   - body compensation, standing pose, jump lifecycle
  *
  * Build:  cc -std=c99 -Wall -Wextra -Werror -pedantic test_sakin.c -lm
  */
@@ -126,19 +128,87 @@ static void ik_clips_unreachable_targets_and_reports_it(void) {
         "clipped solution saturates at the workspace boundary");
 }
 
+/* --- Inside the coxa cylinder (|x,y| < coxa_len): still finite, exact when
+     reachable. The quadrant-safe atan2 formulation (Craig 4.4) keeps this
+     region solvable; only the joint/workspace-clip flags may differ. ------ */
+static void ik_inside_coxa_cylinder_stays_exact_when_reachable(void) {
+  /* Arrange */
+  sakin_config_t cfg;
+  int branch, ok = 1;
+  sakin_real_t worst = 0;
+  sakin_config_default(&cfg);
+  for (branch = 0; branch <= 1; ++branch) {
+    sakin_real_t x, y, z;
+    cfg.elbow_up = branch ? 0 : 1;
+    /* Act: grid strictly inside the coxa cylinder (coxa_len = 35) */
+    for (x = 0.0f; x <= 30.0f; x += 10.0f)
+      for (y = 0.0f; y <= 30.0f; y += 10.0f)
+        for (z = -120.0f; z <= -10.0f; z += 30.0f) {
+          sakin_vec3_t p = { x, y, z }, back;
+          sakin_leg_angles_t a;
+          sakin_real_t r0 = (sakin_real_t)SAKIN__HYPOT(x, y) - cfg.coxa_len;
+          sakin_real_t d = (sakin_real_t)SAKIN__HYPOT(r0, z);
+          int status;
+          if (d < 2.0f || d > cfg.femur_len + cfg.tibia_len - 2.0f)
+            continue; /* outside the annulus: covered by the clip test above */
+          status = sakin_leg_ik(&cfg, p, &a);
+          /* never NaN, always within joint limits */
+          if (a.coxa != a.coxa || a.femur != a.femur || a.tibia != a.tibia) ok = 0;
+          if (a.coxa < -cfg.coxa_lim - 1e-3f || a.coxa > cfg.coxa_lim + 1e-3f) ok = 0;
+          if (a.femur < -cfg.femur_lim - 1e-3f || a.femur > cfg.femur_lim + 1e-3f) ok = 0;
+          if (a.tibia < cfg.tibia_min - 1e-3f || a.tibia > cfg.tibia_max + 1e-3f) ok = 0;
+          /* exactness is only promised when IK reports OK */
+          if (status == SAKIN_IK_OK) {
+            sakin_leg_fk(&cfg, a, &back);
+            if (dist3(p, back) > worst) worst = dist3(p, back);
+            if (dist3(p, back) > 1.0f) ok = 0;
+          }
+        }
+  }
+  /* Assert */
+  CHECK(ok, "inside-coxa targets: finite, limited, exact-when-OK (both branches)");
+  CHECK(worst < 1.0f, "inside-coxa OK roundtrips within 1 mm");
+}
+
+/* --- Degenerate config: zero link length must not NaN the solver ---------- */
+static void ik_degenerate_config_reports_bad_config(void) {
+  /* Arrange */
+  sakin_config_t cfg;
+  sakin_leg_angles_t a = { 9.0f, 9.0f, 9.0f };
+  int status;
+  sakin_config_default(&cfg);
+  cfg.femur_len = 0.0f;
+  /* Act */
+  status = sakin_leg_ik(&cfg, (sakin_vec3_t){ 115.0f, 0.0f, -85.0f }, &a);
+  /* Assert */
+  CHECK(status == SAKIN_IK_BAD_CONFIG, "zero femur_len sets BAD_CONFIG");
+  CHECK(a.coxa == 0.0f && a.femur == 0.0f && a.tibia == 0.0f,
+        "BAD_CONFIG returns a safe zero pose (no NaN)");
+}
+
 /* --- Body compensation: level = identity, yaw-90 rotates exactly --------- */
 static void body_rotate_inv_is_exact(void) {
   /* Arrange */
-  sakin_vec3_t p = { 100.0f, 0.0f, -50.0f }, level, turned;
+  sakin_vec3_t p = { 100.0f, 0.0f, -50.0f }, level, turned, rolled, pitched;
   /* Act */
   level = sakin_body_rotate_inv(p, 0.0f, 0.0f, 0.0f);
   turned = sakin_body_rotate_inv(p, 0.0f, 0.0f, SAKIN_PI / 2.0f);
+  rolled = sakin_body_rotate_inv(p, SAKIN_PI / 2.0f, 0.0f, 0.0f);
+  pitched = sakin_body_rotate_inv(p, 0.0f, SAKIN_PI / 2.0f, 0.0f);
   /* Assert */
   CHECK(dist3(p, level) < 1e-4f, "level body leaves feet untouched");
   CHECK(SAKIN__FABS(turned.x - 0.0f) < 1e-2f &&
         SAKIN__FABS(turned.y + 100.0f) < 1e-2f &&
         SAKIN__FABS(turned.z + 50.0f) < 1e-4f,
         "yaw +90 maps (x,y,z) -> (y,-x,z) exactly (R^T)");
+  CHECK(SAKIN__FABS(rolled.x - 100.0f) < 1e-2f &&
+        SAKIN__FABS(rolled.y + 50.0f) < 1e-2f &&
+        SAKIN__FABS(rolled.z - 0.0f) < 1e-2f,
+        "roll +90 maps (x,y,z) -> (x,z,-y) exactly (R^T)");
+  CHECK(SAKIN__FABS(pitched.x - 50.0f) < 1e-2f &&
+        SAKIN__FABS(pitched.y - 0.0f) < 1e-2f &&
+        SAKIN__FABS(pitched.z - 100.0f) < 1e-2f,
+        "pitch +90 maps (x,y,z) -> (z,y,x) exactly (R^T)");
 }
 
 /* --- Standing pose: feet on the ground, correct radial distance ---------- */
@@ -257,6 +327,8 @@ int main(void) {
   ik_fk_roundtrip_holds_for_both_elbow_branches();
   ik_recovers_precomputed_angles_for_both_branches();
   ik_clips_unreachable_targets_and_reports_it();
+  ik_inside_coxa_cylinder_stays_exact_when_reachable();
+  ik_degenerate_config_reports_bad_config();
   body_rotate_inv_is_exact();
   stance_feet_sit_on_ground_at_nominal_reach();
   gait_engine_walk_is_finite_bounded_and_within_limits();
