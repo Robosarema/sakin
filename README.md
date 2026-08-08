@@ -12,7 +12,9 @@ no globals, float by default).
   (Craig §4.2 workspace-existence check instead of silent clamping)
 - **Mode 2 — gait engine** (stateful): NUKE state machine with tripod, amble,
   and ripple (left/right) gaits, turn-in-place, step-boundary interpolation,
-  continuous gait switching, settle-to-stand, and an optional jump behaviour
+  continuous gait switching, settle-to-stand, a body-Z standing-height channel
+  (`sakin_body_height`; +z lowers the body, -z raises it), and an optional
+  jump behaviour
 - Runtime-configurable geometry — one header serves any robot; 
   defaults included
 

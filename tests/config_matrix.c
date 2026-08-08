@@ -6,6 +6,14 @@
 #define SAKIN_IMPLEMENTATION
 #include "../sakin.h"
 
+#ifndef SAKIN_NO_GAIT
+/* reference the body-Z setter so SAKIN_STATIC builds don't trip
+ * -Wunused-function (the setter is compiled out under SAKIN_NO_GAIT) */
+static void reference_body_height(sakin_t* s) {
+  sakin_body_height(s, 12.5f);
+}
+#endif
+
 int main(void) {
   sakin_config_t cfg;
   sakin_leg_angles_t a;
@@ -17,5 +25,12 @@ int main(void) {
    * -Wunused-function on the ones the gait engine would normally use */
   rot = sakin_body_rotate_inv(p, 0.1f, 0.0f, 0.0f);
   stance = sakin_stance_foot(&cfg, 0);
+#ifndef SAKIN_NO_GAIT
+  {
+    sakin_t bot;
+    sakin_init(&bot, &cfg);
+    reference_body_height(&bot);
+  }
+#endif
   return (int)(back.x - p.x + rot.y * 0.0f + stance.z * 0.0f); /* ~0 */
 }
