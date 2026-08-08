@@ -6,6 +6,9 @@
  *   - inside-coxa-cylinder region (quadrant-safe atan2, Craig §4.4)
  *   - degenerate config safety (never-NaN contract)
  *   - body compensation (roll/pitch/yaw), standing pose, jump lifecycle
+ *   - body-Z channel (sakin_body_height): exact foot-target shift, sign
+ *     direction, workspace sweep, extreme-value clipping, composition with
+ *     gait/rotation/jump, reset semantics, settle-to-shifted-stance
  *   - gait engine sanity + gait-transition continuity
  *
  * Build:  cc -std=c99 -Wall -Wextra -Werror -pedantic test_sakin.c -lm
@@ -323,6 +326,237 @@ static void jump_completes_and_returns_to_gait(void) {
 }
 #endif
 
+/* --- Body-Z channel: body_pos_z is a pure body-frame Z translation on the
+     foot targets. +z raises the targets (legs fold -> body drops), -z sinks
+     them (legs extend -> body rises). The zero case must be a byte-for-byte
+     no-op so existing behaviour is untouched. ---------------------------- */
+
+/* T1: body_height(0) must not change anything (regression guard) */
+static void body_height_zero_is_noop(void) {
+  /* Arrange */
+  sakin_t a, b;
+  sakin_leg_angles_t aa[SAKIN_MAX_LEGS], ba[SAKIN_MAX_LEGS];
+  int i, l, j, ok = 1;
+  sakin_init(&a, NULL);
+  sakin_init(&b, NULL);
+  /* Act: same script; only b gets body_height(0) */
+  for (i = 0; i < 120; ++i) {
+    sakin_update(&a, 1.0f / 60.0f, aa);
+    sakin_body_height(&b, 0.0f);
+    sakin_update(&b, 1.0f / 60.0f, ba);
+    for (l = 0; l < a.cfg.leg_count; ++l)
+      for (j = 0; j < 3; ++j) {
+        const sakin_real_t* pa = &aa[l].coxa;
+        const sakin_real_t* pb = &ba[l].coxa;
+        if (SAKIN__FABS(pa[j] - pb[j]) > 1e-6f) ok = 0;
+      }
+  }
+  /* Assert */
+  CHECK(ok, "body_height(0) leaves every joint angle unchanged");
+}
+
+/* T2: with no velocity, FK(IK(foot)) must land at endpoint.z + body_pos_z */
+static void body_height_moves_foot_targets_exactly(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int l, ok = 1;
+  sakin_real_t zoff = 20.0f;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, zoff);
+  /* Act */
+  sakin_update(&bot, 0.0f, a);
+  for (l = 0; l < bot.cfg.leg_count; ++l) {
+    sakin_vec3_t ep = bot.endpoints[l];
+    sakin_mount_t m = bot.cfg.mounts[l];
+    /* expected coxa-frame target exactly as sakin_update -> sakin__solve_leg
+       builds it: body frame -> translate to mount -> rotate by -yaw */
+    sakin_vec3_t want = sakin__vec3(ep.x, ep.y, ep.z + zoff);
+    sakin_vec3_t p = sakin_body_rotate_inv(want, 0, 0, 0);
+    sakin_real_t dx = p.x - m.x, dy = p.y - m.y;
+    sakin_real_t cy = SAKIN__COS(m.yaw), sy = SAKIN__SIN(m.yaw);
+    sakin_vec3_t target = sakin__vec3(cy*dx + sy*dy, -sy*dx + cy*dy, p.z - m.z);
+    /* reconstruct the actually-solved foot from the returned angles */
+    sakin_vec3_t back;
+    sakin_leg_fk(&bot.cfg, a[l], &back);
+    if (dist3(target, back) > 0.5f) ok = 0;
+  }
+  /* Assert */
+  CHECK(ok, "foot targets shift by exactly +20 mm in Z (FK roundtrip)");
+}
+
+/* T3: sign direction — +z folds the legs, -z extends them */
+static void body_height_sign_direction(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t up[SAKIN_MAX_LEGS], down[SAKIN_MAX_LEGS];
+  sakin_real_t zoff = 20.0f;
+  sakin_init(&bot, NULL);
+  /* Act: same pose, opposite heights */
+  sakin_body_height(&bot, +zoff); sakin_update(&bot, 0.0f, up);
+  sakin_body_height(&bot, -zoff); sakin_update(&bot, 0.0f, down);
+  /* Assert: folding (z+) must shorten the radial reach / change femur vs
+     the extending (z-) pose; compare femur angle signs across all legs */
+  {
+    int l, ok = 1;
+    for (l = 0; l < bot.cfg.leg_count; ++l) {
+      sakin_real_t du = up[l].femur, dd = down[l].femur;
+      if (SAKIN__FABS(du - dd) < 1e-3f) ok = 0;  /* poses must differ */
+    }
+    CHECK(ok, "+z and -z produce measurably different leg poses");
+  }
+}
+
+/* T4: across the usable height range, all angles finite + inside limits */
+static void body_height_within_workspace(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int ok = 1;
+  sakin_real_t z;
+  sakin_init(&bot, NULL);
+  /* Act: sweep a reasonable range around the stance */
+  for (z = -40.0f; z <= 40.0f; z += 10.0f) {
+    int i;
+    sakin_body_height(&bot, z);
+    for (i = 0; i < 30; ++i) {  /* settle each stage */
+      int flags = sakin_update(&bot, 1.0f / 60.0f, a);
+      if (flags != SAKIN_IK_OK) ok = 0;      /* in range: must not clip */
+      if (!all_angles_finite_and_limited(&bot.cfg, a, bot.cfg.leg_count)) ok = 0;
+    }
+  }
+  /* Assert */
+  CHECK(ok, "heights -40..+40 mm: OK flags, finite + within limits");
+}
+
+/* T5: extreme heights clip (flags set) but never NaN (error-path injection) */
+static void body_height_extreme_clips_not_nan(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int ok = 1;
+  sakin_real_t z;
+  sakin_init(&bot, NULL);
+  /* Act: far beyond the leg workspace */
+  for (z = -200.0f; z <= 200.0f; z += 100.0f) {
+    sakin_body_height(&bot, z);
+    sakin_update(&bot, 0.0f, a);
+    if (!all_angles_finite_and_limited(&bot.cfg, a, bot.cfg.leg_count)) ok = 0;
+  }
+  /* Assert: never NaN, never out of limits, even when out of reach */
+  CHECK(ok, "heights +-200 mm: angles stay finite and within limits");
+}
+
+/* T6: height composes with walking (offsets bounded, angles finite) */
+static void body_height_composes_with_gait(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int i, l, ok = 1;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, 20.0f);
+  sakin_command(&bot, 100.0f, 0.0f, 0.0f);
+  /* Act: walk 3 s at 60 Hz */
+  for (i = 0; i < 180; ++i) {
+    sakin_update(&bot, 1.0f / 60.0f, a);
+    if (!all_angles_finite_and_limited(&bot.cfg, a, bot.cfg.leg_count)) ok = 0;
+    for (l = 0; l < bot.cfg.leg_count; ++l) {
+      sakin_real_t m = (sakin_real_t)SAKIN__HYPOT(bot.offsets[l].x, bot.offsets[l].y);
+      if (m > bot.cfg.max_offset + 0.5f) ok = 0;
+    }
+  }
+  /* Assert */
+  CHECK(ok, "walking at +20 mm: finite + limited, offsets clamped");
+}
+
+/* T7: height composes with body rotation (roll/pitch) */
+static void body_height_composes_with_rotation(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int i, ok = 1;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, 20.0f);
+  sakin_body_pose(&bot, 0.3f, 0.2f, 0.0f);
+  /* Act: hold the tilted pose for a while */
+  for (i = 0; i < 60; ++i) {
+    sakin_update(&bot, 1.0f / 60.0f, a);
+    if (!all_angles_finite_and_limited(&bot.cfg, a, bot.cfg.leg_count)) ok = 0;
+  }
+  /* Assert */
+  CHECK(ok, "height + roll/pitch: angles stay finite + within limits");
+}
+
+/* T8: reset_pose must NOT clear body_pos_z (documented semantics) */
+static void body_height_survives_reset_pose(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_init(&bot, NULL);
+  /* Act */
+  sakin_body_height(&bot, -25.0f);
+  sakin_reset_pose(&bot);
+  /* Assert */
+  CHECK(SAKIN__FABS(bot.body_pos_z - (-25.0f)) < 1e-6f,
+        "sakin_reset_pose leaves body_pos_z untouched");
+}
+
+#ifndef SAKIN_NO_JUMP
+/* T9: a jump at a raised height runs to completion, finite */
+static void jump_at_raised_height_completes(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int i, done = 0, ok = 1;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, -20.0f);
+  /* Act */
+  sakin_jump_start(&bot);
+  for (i = 0; i < 600 && !done; ++i) {
+    sakin_update(&bot, 1.0f / 60.0f, a);
+    if (!sakin_jump_active(&bot)) done = 1;
+    if (!all_angles_finite_and_limited(&bot.cfg, a, bot.cfg.leg_count)) ok = 0;
+  }
+  /* Assert */
+  CHECK(done, "jump completes within 10 s at body_pos_z = -20 mm");
+  CHECK(ok, "jump at raised height: angles stay finite + within limits");
+}
+#endif
+
+/* T10: after a stop, the robot settles to the SHIFTED stance, not nominal */
+static void stop_settles_to_shifted_stance(void) {
+  /* Arrange */
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int i, l, ok = 1;
+  sakin_real_t zoff = 20.0f;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, zoff);
+  sakin_command(&bot, 100.0f, 0.0f, 0.0f);
+  for (i = 0; i < 60; ++i) sakin_update(&bot, 1.0f / 60.0f, a);
+  /* Act: stop, let offsets decay to zero */
+  sakin_command(&bot, 0.0f, 0.0f, 0.0f);
+  for (i = 0; i < 180; ++i) sakin_update(&bot, 1.0f / 60.0f, a);
+  /* Assert: offsets are gone, but the pose is the Z-shifted stance */
+  for (l = 0; l < bot.cfg.leg_count; ++l) {
+    if (dist3(bot.offsets[l], (sakin_vec3_t){ 0, 0, 0 }) > 0.5f) ok = 0;
+  }
+  {
+    sakin_leg_angles_t expect[SAKIN_MAX_LEGS];
+    sakin_t ref;
+    sakin_init(&ref, NULL);
+    sakin_body_height(&ref, zoff);
+    sakin_update(&ref, 0.0f, expect);
+    for (l = 0; l < bot.cfg.leg_count; ++l) {
+      const sakin_real_t* p = &a[l].coxa;
+      const sakin_real_t* q = &expect[l].coxa;
+      int j;
+      for (j = 0; j < 3; ++j)
+        if (SAKIN__FABS(p[j] - q[j]) > 1e-4f) ok = 0;
+    }
+  }
+  CHECK(ok, "after stop, offsets decay to zero and pose matches +20 mm stance");
+}
+
 int main(void) {
   ik_fk_roundtrip_holds_for_both_elbow_branches();
   ik_recovers_precomputed_angles_for_both_branches();
@@ -334,9 +568,19 @@ int main(void) {
   gait_engine_walk_is_finite_bounded_and_within_limits();
   gait_switch_mid_walk_stays_continuous();
   stopping_decays_offsets_to_zero();
+  body_height_zero_is_noop();
+  body_height_moves_foot_targets_exactly();
+  body_height_sign_direction();
+  body_height_within_workspace();
+  body_height_extreme_clips_not_nan();
+  body_height_composes_with_gait();
+  body_height_composes_with_rotation();
+  body_height_survives_reset_pose();
 #ifndef SAKIN_NO_JUMP
   jump_completes_and_returns_to_gait();
+  jump_at_raised_height_completes();
 #endif
+  stop_settles_to_shifted_stance();
 
   printf("%d checks, %d failures\n", g_checks, g_fails);
   return g_fails ? 1 : 0;

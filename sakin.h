@@ -49,7 +49,8 @@
             sakin_init / sakin_reset_pose
             sakin_gait_select .......... tripod, amble, ripple/left/right
             sakin_command .............. velocity: vx, vy mm/s, omega rad/s
-            sakin_body_pose / shift .... body orientation / XY translation
+            sakin_body_pose / shift / height . body orientation / XY and Z
+                                                translation (Z + = body drops)
             sakin_update ............... advance clock, solve all legs
             sakin_jump_start ........... optional jump behaviour
 
@@ -174,6 +175,8 @@
 
 RECENT REVISION HISTORY:
 
+      2026-08-08  body-Z channel: sakin_body_height() + sakin_t.body_pos_z
+                  (standing-height control; +z lowers the body, -z raises it)
       2026-07-31  initial release
 
    See end of file for full revision history.
@@ -333,6 +336,8 @@ typedef struct {
   // commanded body pose / translation
   sakin_real_t body_rot_x, body_rot_y, body_rot_z;
   sakin_real_t body_pos_x, body_pos_y;
+  sakin_real_t body_pos_z; // body translation in Z (mm): + = feet targets rise
+                           // in the body frame -> legs fold -> BODY DROPS
 
   // commanded velocity: mm/s (X fwd, Y left), rad/s (CCW positive)
   sakin_real_t vx, vy, omega;
@@ -368,6 +373,11 @@ SAKIN_DEF void sakin_body_pose(sakin_t* s, sakin_real_t roll, sakin_real_t pitch
 
 // body translation command (mm) in the body XY plane
 SAKIN_DEF void sakin_body_shift(sakin_t* s, sakin_real_t x, sakin_real_t y);
+
+// body translation command (mm) in the body Z axis. +z raises the foot
+// targets in the body frame -> legs fold -> BODY DROPS; -z extends them
+// -> BODY RISES. Composes with the gait, jump and body pose channels.
+SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z);
 
 // reset endpoints to the standing pose and restart the gait engine
 // (back to TRIPOD, the power-on default)
@@ -664,6 +674,10 @@ SAKIN_DEF void sakin_body_shift(sakin_t* s, sakin_real_t x, sakin_real_t y) {
   s->body_pos_y = y;
 }
 
+SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z) {
+  s->body_pos_z = z;
+}
+
 // the NUKE rule, evaluated once per step boundary for one leg
 static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
   const sakin_config_t* c = &s->cfg;
@@ -858,7 +872,8 @@ static int sakin__jump_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* o
 solve:
   for (l = 0; l < c->leg_count; ++l) {
     sakin_vec3_t ep = s->endpoints[l];
-    sakin_vec3_t foot = sakin__vec3(ep.x + s->body_pos_x, ep.y + s->body_pos_y, ep.z + dz + lift);
+    sakin_vec3_t foot = sakin__vec3(ep.x + s->body_pos_x, ep.y + s->body_pos_y,
+                                    ep.z + s->body_pos_z + dz + lift);
     *flags |= sakin__solve_leg(s, l, foot, &out[l]);
   }
   return 1;
@@ -902,7 +917,7 @@ SAKIN_DEF void sakin_init(sakin_t* s, const sakin_config_t* cfg) {
     s->cfg.leg_count = SAKIN_MAX_LEGS;
 
   s->body_rot_x = s->body_rot_y = s->body_rot_z = 0;
-  s->body_pos_x = s->body_pos_y = 0;
+  s->body_pos_x = s->body_pos_y = s->body_pos_z = 0;
   s->vx = s->vy = s->omega = 0;
 #ifndef SAKIN_NO_JUMP
   s->jump_active = 0;
@@ -928,7 +943,8 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
   for (l = 0; l < c->leg_count; ++l) {
     sakin_vec3_t ep = s->endpoints[l], off = s->offsets[l];
     sakin_vec3_t foot =
-      sakin__vec3(ep.x + off.x + s->body_pos_x, ep.y + off.y + s->body_pos_y, ep.z + off.z);
+      sakin__vec3(ep.x + off.x + s->body_pos_x, ep.y + off.y + s->body_pos_y,
+                  ep.z + off.z + s->body_pos_z);
     flags |= sakin__solve_leg(s, l, foot, &angles_out[l]);
   }
   return flags;
@@ -941,6 +957,9 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 /*
    FULL REVISION HISTORY
 
+      2026-08-08  body-Z channel: sakin_body_height() + sakin_t.body_pos_z;
+                  foot targets in sakin_update() and the jump path gain the
+                  Z translation (+z folds the legs -> body drops)
       2026-07-31  initial release: core leg IK/FK with reachability flags,
                   gait engine (ripple, ripple-left/right, amble, tripod),
                   exact body compensation, jump, C99 + C++ compatible

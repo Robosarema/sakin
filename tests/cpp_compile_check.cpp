@@ -14,6 +14,7 @@ int main() {
   sakin_init(&bot, 0); // NULL config
   sakin_gait_select(&bot, SAKIN_GAIT_RIPPLE);
   sakin_command(&bot, 50.0f, 0.0f, 0.0f);
+  sakin_body_height(&bot, 10.0f); // body-Z channel must exist in C++
 
   sakin_leg_angles_t angles[SAKIN_MAX_LEGS];
   sakin_update(&bot, 1.0f / 60.0f, angles);
