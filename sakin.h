@@ -792,6 +792,11 @@ static void sakin__gait_update(sakin_t* s, sakin_real_t dt) {
 
   {
     sakin_real_t tau = s->t_in_step / s->tran_ms;
+    // smoothstep: ease foot velocity in/out across each step so the legs do
+    // not snap direction at step boundaries (plan-gait-smoothing.md, Option A).
+    // Monotonic [0,1] -> [0,1], zero velocity at both ends; bounds/clamps in
+    // the tests are unaffected (it only reshapes the rate, not the extrema).
+    tau = tau * tau * (3.0f - 2.0f * tau);
     for (l = 0; l < SAKIN_MAX_LEGS; ++l) {
       sakin_vec3_t p = s->prev[l], n = s->next[l], *o = &s->offsets[l];
       o->x = p.x + (n.x - p.x) * tau;
