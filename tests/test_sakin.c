@@ -557,6 +557,113 @@ static void stop_settles_to_shifted_stance(void) {
   CHECK(ok, "after stop, offsets decay to zero and pose matches +20 mm stance");
 }
 
+/* --- Per-leg Z channel: leg_z[] is a per-leg body-frame Z translation on
+     the foot targets. +z raises THAT leg's target (that leg folds), other
+     legs untouched. The zero case must be a byte-for-byte no-op. ---------- */
+
+/* T1: leg_height(0) on all legs must not change anything (regression guard) */
+static void leg_z_zero_is_noop(void) {
+  sakin_t a, b;
+  sakin_leg_angles_t aa[SAKIN_MAX_LEGS], ba[SAKIN_MAX_LEGS];
+  sakin_real_t zeros[SAKIN_MAX_LEGS] = {0};
+  int i, l, j, ok = 1;
+  sakin_init(&a, NULL);
+  sakin_init(&b, NULL);
+  for (i = 0; i < 120; ++i) {
+    sakin_update(&a, 1.0f / 60.0f, aa);
+    sakin_leg_heights(&b, zeros);
+    sakin_update(&b, 1.0f / 60.0f, ba);
+    for (l = 0; l < a.cfg.leg_count; ++l)
+      for (j = 0; j < 3; ++j) {
+        const sakin_real_t* pa = &aa[l].coxa;
+        const sakin_real_t* pb = &ba[l].coxa;
+        if (SAKIN__FABS(pa[j] - pb[j]) > 1e-6f) ok = 0;
+      }
+  }
+  CHECK(ok, "leg_height(0) leaves every joint angle unchanged");
+}
+
+/* T2: leg_height(+z) on ONE leg moves ONLY that leg's foot target */
+static void leg_z_moves_only_that_leg(void) {
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int l, ok = 1;
+  sakin_real_t zoff = 20.0f;
+  sakin_init(&bot, NULL);
+  sakin_leg_height(&bot, 0, zoff);   // only leg 0 gets +20 mm
+  sakin_update(&bot, 0.0f, a);
+  for (l = 0; l < bot.cfg.leg_count; ++l) {
+    sakin_vec3_t ep = bot.endpoints[l];
+    sakin_mount_t m = bot.cfg.mounts[l];
+    sakin_real_t want_z = ep.z + (l == 0 ? zoff : 0.0f);
+    sakin_vec3_t want = sakin__vec3(ep.x, ep.y, want_z);
+    sakin_vec3_t p = sakin_body_rotate_inv(want, 0, 0, 0);
+    sakin_real_t dx = p.x - m.x, dy = p.y - m.y;
+    sakin_real_t cy = SAKIN__COS(m.yaw), sy = SAKIN__SIN(m.yaw);
+    sakin_vec3_t target = sakin__vec3(cy*dx + sy*dy, -sy*dx + cy*dy, p.z - m.z);
+    sakin_vec3_t back;
+    sakin_leg_fk(&bot.cfg, a[l], &back);
+    if (dist3(target, back) > 0.5f) ok = 0;
+  }
+  CHECK(ok, "leg_height(+20) on leg 0 moves only leg 0's foot target");
+}
+
+/* T3: leg_heights() sets all legs at once; sign: +z folds, -z extends */
+static void leg_z_heights_all_and_sign(void) {
+  sakin_t bot;
+  sakin_leg_angles_t up[SAKIN_MAX_LEGS], down[SAKIN_MAX_LEGS];
+  sakin_real_t zoff = 15.0f;
+  int l, ok = 1;
+  sakin_init(&bot, NULL);
+  /* all legs +15: every tibia folds (knee angle increases) */
+  for (l = 0; l < bot.cfg.leg_count; ++l)
+    sakin_leg_height(&bot, l, +zoff);
+  sakin_update(&bot, 0.0f, up);
+  /* all legs -15: every tibia extends */
+  for (l = 0; l < bot.cfg.leg_count; ++l)
+    sakin_leg_height(&bot, l, -zoff);
+  sakin_update(&bot, 0.0f, down);
+  for (l = 0; l < bot.cfg.leg_count; ++l) {
+    if (up[l].tibia <= down[l].tibia) ok = 0;  // +z folds -> larger tibia angle
+  }
+  CHECK(ok, "leg_heights(+15) folds all tibias, (-15) extends them");
+}
+
+/* T4: leg_z composes with body_height (body-wide + per-leg add) */
+static void leg_z_composes_with_body_height(void) {
+  sakin_t bot;
+  sakin_leg_angles_t a[SAKIN_MAX_LEGS];
+  int l, ok = 1;
+  sakin_real_t body_z = 10.0f, leg_z = 12.0f;
+  sakin_init(&bot, NULL);
+  sakin_body_height(&bot, body_z);
+  sakin_leg_height(&bot, 2, leg_z);   // leg 2 gets body_z + leg_z = 22
+  sakin_update(&bot, 0.0f, a);
+  for (l = 0; l < bot.cfg.leg_count; ++l) {
+    sakin_vec3_t ep = bot.endpoints[l];
+    sakin_mount_t m = bot.cfg.mounts[l];
+    sakin_real_t want_z = ep.z + body_z + (l == 2 ? leg_z : 0.0f);
+    sakin_vec3_t want = sakin__vec3(ep.x, ep.y, want_z);
+    sakin_vec3_t p = sakin_body_rotate_inv(want, 0, 0, 0);
+    sakin_real_t dx = p.x - m.x, dy = p.y - m.y;
+    sakin_real_t cy = SAKIN__COS(m.yaw), sy = SAKIN__SIN(m.yaw);
+    sakin_vec3_t target = sakin__vec3(cy*dx + sy*dy, -sy*dx + cy*dy, p.z - m.z);
+    sakin_vec3_t back;
+    sakin_leg_fk(&bot.cfg, a[l], &back);
+    if (dist3(target, back) > 0.5f) ok = 0;
+  }
+  CHECK(ok, "leg_z composes additively with body_height");
+}
+
+/* T5: reset_pose clears leg_z (unlike body_pos_z, which survives) */
+static void leg_z_cleared_by_reset_pose(void) {
+  sakin_t bot;
+  sakin_init(&bot, NULL);
+  sakin_leg_height(&bot, 0, 30.0f);
+  sakin_reset_pose(&bot);
+  CHECK(bot.leg_z[0] == 0.0f, "sakin_reset_pose clears leg_z");
+}
+
 int main(void) {
   ik_fk_roundtrip_holds_for_both_elbow_branches();
   ik_recovers_precomputed_angles_for_both_branches();
@@ -576,6 +683,11 @@ int main(void) {
   body_height_composes_with_gait();
   body_height_composes_with_rotation();
   body_height_survives_reset_pose();
+  leg_z_zero_is_noop();
+  leg_z_moves_only_that_leg();
+  leg_z_heights_all_and_sign();
+  leg_z_composes_with_body_height();
+  leg_z_cleared_by_reset_pose();
 #ifndef SAKIN_NO_JUMP
   jump_completes_and_returns_to_gait();
   jump_at_raised_height_completes();

@@ -339,6 +339,12 @@ typedef struct {
   sakin_real_t body_pos_z; // body translation in Z (mm): + = feet targets rise
                            // in the body frame -> legs fold -> BODY DROPS
 
+  // per-leg Z offset (mm): +z = that foot's target rises -> that leg folds.
+  // Composes with body_pos_z (body-wide) and the gait/jump/pose channels.
+  // This is the stair-climbing channel: front legs on the step, rear on the
+  // ground. 0 = no per-leg offset (flat-ground no-op).
+  sakin_real_t leg_z[SAKIN_MAX_LEGS];
+
   // commanded velocity: mm/s (X fwd, Y left), rad/s (CCW positive)
   sakin_real_t vx, vy, omega;
 
@@ -378,6 +384,16 @@ SAKIN_DEF void sakin_body_shift(sakin_t* s, sakin_real_t x, sakin_real_t y);
 // targets in the body frame -> legs fold -> BODY DROPS; -z extends them
 // -> BODY RISES. Composes with the gait, jump and body pose channels.
 SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z);
+
+// per-leg Z offset command (mm): +z raises THAT leg's foot target -> that
+// leg folds. The stair-climbing channel (front legs on the step, rear on the
+// ground). Composes with body_pos_z, the gait, jump and body pose channels.
+// 0 = no per-leg offset (flat-ground no-op).
+SAKIN_DEF void sakin_leg_height(sakin_t* s, int leg, sakin_real_t z);
+
+// set all per-leg Z offsets at once (array of SAKIN_MAX_LEGS, or fewer if
+// leg_count is known — unused entries are ignored)
+SAKIN_DEF void sakin_leg_heights(sakin_t* s, const sakin_real_t* z);
 
 // reset endpoints to the standing pose and restart the gait engine
 // (back to TRIPOD, the power-on default)
@@ -678,6 +694,19 @@ SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z) {
   s->body_pos_z = z;
 }
 
+SAKIN_DEF void sakin_leg_height(sakin_t* s, int leg, sakin_real_t z) {
+  if (!s || leg < 0 || leg >= SAKIN_MAX_LEGS)
+    return;
+  s->leg_z[leg] = z;
+}
+
+SAKIN_DEF void sakin_leg_heights(sakin_t* s, const sakin_real_t* z) {
+  if (!s || !z)
+    return;
+  for (int l = 0; l < SAKIN_MAX_LEGS; ++l)
+    s->leg_z[l] = z[l];
+}
+
 // the NUKE rule, evaluated once per step boundary for one leg
 static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
   const sakin_config_t* c = &s->cfg;
@@ -873,7 +902,7 @@ solve:
   for (l = 0; l < c->leg_count; ++l) {
     sakin_vec3_t ep = s->endpoints[l];
     sakin_vec3_t foot = sakin__vec3(ep.x + s->body_pos_x, ep.y + s->body_pos_y,
-                                    ep.z + s->body_pos_z + dz + lift);
+                                    ep.z + s->body_pos_z + dz + lift + s->leg_z[l]);
     *flags |= sakin__solve_leg(s, l, foot, &out[l]);
   }
   return 1;
@@ -897,6 +926,7 @@ SAKIN_DEF void sakin_reset_pose(sakin_t* s) {
     s->offsets[l] = sakin__vec3(0, 0, 0);
     s->prev[l] = sakin__vec3(0, 0, 0);
     s->next[l] = sakin__vec3(0, 0, 0);
+    s->leg_z[l] = 0;   // per-leg Z is a commanded offset: cleared on reset
   }
   for (l = 0; l < s->cfg.leg_count; ++l)
     s->endpoints[l] = sakin_stance_foot(&s->cfg, l);
@@ -918,6 +948,8 @@ SAKIN_DEF void sakin_init(sakin_t* s, const sakin_config_t* cfg) {
 
   s->body_rot_x = s->body_rot_y = s->body_rot_z = 0;
   s->body_pos_x = s->body_pos_y = s->body_pos_z = 0;
+  for (l = 0; l < SAKIN_MAX_LEGS; ++l)
+    s->leg_z[l] = 0;
   s->vx = s->vy = s->omega = 0;
 #ifndef SAKIN_NO_JUMP
   s->jump_active = 0;
@@ -944,7 +976,7 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
     sakin_vec3_t ep = s->endpoints[l], off = s->offsets[l];
     sakin_vec3_t foot =
       sakin__vec3(ep.x + off.x + s->body_pos_x, ep.y + off.y + s->body_pos_y,
-                  ep.z + off.z + s->body_pos_z);
+                  ep.z + off.z + s->body_pos_z + s->leg_z[l]);
     flags |= sakin__solve_leg(s, l, foot, &angles_out[l]);
   }
   return flags;
@@ -957,6 +989,9 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 /*
    FULL REVISION HISTORY
 
+      2026-08-21  per-leg Z channel: sakin_leg_height()/sakin_leg_heights() +
+                  sakin_t.leg_z[]; foot targets in sakin_update() and the jump
+                  path gain the per-leg Z offset (stair-climbing channel)
       2026-08-08  body-Z channel: sakin_body_height() + sakin_t.body_pos_z;
                   foot targets in sakin_update() and the jump path gain the
                   Z translation (+z folds the legs -> body drops)
