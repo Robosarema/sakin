@@ -1,4 +1,10 @@
-/* sakin - kinematics + gait engine for legged robots - Robosarema
+/* SPDX-License-Identifier: 0BSD
+ * sakin - kinematics + gait engine for legged robots - Robosarema
+ *
+ * Released under the BSD Zero Clause License (0BSD): use, modify, and
+ * redistribute freely, with or without attribution, and with no warranty.
+ * The full license text is at the bottom of this file.
+ *
  * no warranty implied; use at your own risk
 
    Do this:
@@ -189,6 +195,12 @@ RECENT REVISION HISTORY:
 extern "C" {
 #endif
 
+// library version
+#define SAKIN_VERSION_MAJOR 0
+#define SAKIN_VERSION_MINOR 2
+#define SAKIN_VERSION_PATCH 0
+#define SAKIN_VERSION "0.2.0"
+
 // declaration specifier: override SAKIN_DEF directly, or #define SAKIN_STATIC
 #ifndef SAKIN_DEF
 #ifdef SAKIN_STATIC
@@ -207,6 +219,10 @@ typedef float sakin_real_t;
 
 #ifndef SAKIN_MAX_LEGS
 #define SAKIN_MAX_LEGS 6
+#endif
+
+#if SAKIN_MAX_LEGS < 1
+#error "SAKIN_MAX_LEGS must be at least 1 (it sizes the context arrays)"
 #endif
 
 #define SAKIN_PI ((sakin_real_t)3.14159265358979323846)
@@ -469,6 +485,9 @@ SAKIN_DEF void sakin_config_default(sakin_config_t* cfg) {
   static const sakin_real_t tran[SAKIN_GAIT_COUNT] = { 120.0f, 120.0f, 120.0f, 150.0f, 65.0f };
   int i, l, n = SAKIN_MAX_LEGS < 6 ? SAKIN_MAX_LEGS : 6;
 
+  if (!cfg)
+    return;
+
   cfg->leg_count = n;
 
   cfg->coxa_len = 35.0f;
@@ -526,10 +545,19 @@ SAKIN_DEF void sakin_config_default(sakin_config_t* cfg) {
 // for hardware (better a saturated solution than NaN at a servo)
 SAKIN_DEF int
 sakin_leg_ik(const sakin_config_t* cfg, sakin_vec3_t target, sakin_leg_angles_t* out) {
-  const sakin_real_t lf = cfg->femur_len, lt = cfg->tibia_len;
-  const sakin_real_t eps = (sakin_real_t)1e-6;
+  sakin_real_t lf, lt, gamma, r, d, d_lo, d_hi, alpha, cos_b, beta, cos_p, kappa, femur;
+  sakin_real_t eps = (sakin_real_t)1e-6;
   int status = SAKIN_IK_OK;
-  sakin_real_t gamma, r, d, d_lo, d_hi, alpha, cos_b, beta, cos_p, kappa, femur;
+
+  // null pointers are a caller bug, but don't crash on them either
+  if (!cfg || !out) {
+    if (out)
+      out->coxa = out->femur = out->tibia = 0;
+    return SAKIN_IK_BAD_CONFIG;
+  }
+
+  lf = cfg->femur_len;
+  lt = cfg->tibia_len;
 
   // degenerate configs would make the law-of-cosines denominators below
   // zero (0/0 -> NaN); report BAD_CONFIG and return a safe zero pose so the
@@ -581,11 +609,24 @@ SAKIN_DEF void
 sakin_leg_fk(const sakin_config_t* cfg, sakin_leg_angles_t angles, sakin_vec3_t* out_foot) {
   // exact inverse of sakin_leg_ik -- includes the tibia term in r; the knee
   // fold direction mirrors with the elbow branch
-  sakin_real_t beta = -angles.femur, kappa = angles.tibia;
-  sakin_real_t fold = cfg->elbow_up ? beta - kappa : beta + kappa;
-  sakin_real_t r =
-    cfg->coxa_len + cfg->femur_len * SAKIN__COS(beta) + cfg->tibia_len * SAKIN__COS(fold);
-  sakin_real_t z = cfg->femur_len * SAKIN__SIN(beta) + cfg->tibia_len * SAKIN__SIN(fold);
+  sakin_real_t beta, kappa, fold, r, z;
+
+  if (!cfg || !out_foot) {
+    if (out_foot)
+      out_foot->x = out_foot->y = out_foot->z = 0;
+    return;
+  }
+  // mirror the IK's degenerate-config contract: never emit NaN/garbage
+  if (cfg->femur_len <= (sakin_real_t)0 || cfg->tibia_len <= (sakin_real_t)0) {
+    out_foot->x = out_foot->y = out_foot->z = 0;
+    return;
+  }
+
+  beta = -angles.femur;
+  kappa = angles.tibia;
+  fold = cfg->elbow_up ? beta - kappa : beta + kappa;
+  r = cfg->coxa_len + cfg->femur_len * SAKIN__COS(beta) + cfg->tibia_len * SAKIN__COS(fold);
+  z = cfg->femur_len * SAKIN__SIN(beta) + cfg->tibia_len * SAKIN__SIN(fold);
   out_foot->x = r * SAKIN__COS(angles.coxa);
   out_foot->y = r * SAKIN__SIN(angles.coxa);
   out_foot->z = z;
@@ -621,9 +662,16 @@ sakin_body_rotate_inv(sakin_vec3_t p, sakin_real_t roll, sakin_real_t pitch, sak
 }
 
 SAKIN_DEF sakin_vec3_t sakin_stance_foot(const sakin_config_t* cfg, int leg) {
-  const sakin_mount_t* m = &cfg->mounts[leg];
-  sakin_real_t reach = cfg->coxa_len + cfg->foot_reach;
-  sakin_real_t z = -(cfg->coxa_height + cfg->body_half_h) + cfg->foot_radius;
+  const sakin_mount_t* m;
+  sakin_real_t reach, z;
+
+  // bounds: a bad index would read past mounts[]; return the origin instead
+  if (!cfg || leg < 0 || leg >= SAKIN_MAX_LEGS)
+    return sakin__vec3(0, 0, 0);
+
+  m = &cfg->mounts[leg];
+  reach = cfg->coxa_len + cfg->foot_reach;
+  z = -(cfg->coxa_height + cfg->body_half_h) + cfg->foot_radius;
   return sakin__vec3(m->x + SAKIN__COS(m->yaw) * reach, m->y + SAKIN__SIN(m->yaw) * reach, z);
 }
 
@@ -649,6 +697,8 @@ static void sakin__load_gait(sakin_t* s, int gait_id) {
 }
 
 SAKIN_DEF void sakin_gait_select(sakin_t* s, int gait_id) {
+  if (!s)
+    return;
   if (gait_id == s->gait_id)
     return;
   if (gait_id < 0 || gait_id >= SAKIN_GAIT_COUNT)
@@ -657,6 +707,8 @@ SAKIN_DEF void sakin_gait_select(sakin_t* s, int gait_id) {
 }
 
 SAKIN_DEF void sakin_command(sakin_t* s, sakin_real_t vx, sakin_real_t vy, sakin_real_t omega) {
+  if (!s)
+    return;
   s->vx = vx;
   s->vy = vy;
   s->omega = omega;
@@ -664,17 +716,23 @@ SAKIN_DEF void sakin_command(sakin_t* s, sakin_real_t vx, sakin_real_t vy, sakin
 
 SAKIN_DEF void
 sakin_body_pose(sakin_t* s, sakin_real_t roll, sakin_real_t pitch, sakin_real_t yaw) {
+  if (!s)
+    return;
   s->body_rot_x = roll;
   s->body_rot_y = pitch;
   s->body_rot_z = yaw;
 }
 
 SAKIN_DEF void sakin_body_shift(sakin_t* s, sakin_real_t x, sakin_real_t y) {
+  if (!s)
+    return;
   s->body_pos_x = x;
   s->body_pos_y = y;
 }
 
 SAKIN_DEF void sakin_body_height(sakin_t* s, sakin_real_t z) {
+  if (!s)
+    return;
   s->body_pos_z = z;
 }
 
@@ -733,7 +791,11 @@ static sakin_vec3_t sakin__boundary_target(const sakin_t* s, int leg) {
 
 // decay offsets to zero when the robot is told to stand still
 static void sakin__settle(sakin_t* s, sakin_real_t dt) {
-  sakin_real_t decay = SAKIN__FMAX(0.0f, 1.0f - dt / s->cfg.settle_time);
+  sakin_real_t st = s->cfg.settle_time;
+  // settle_time <= 0 would divide by zero; treat it as "snap to zero"
+  sakin_real_t decay = st > (sakin_real_t)0
+                         ? SAKIN__FMAX((sakin_real_t)0, (sakin_real_t)1 - dt / st)
+                         : (sakin_real_t)0;
   int settled = 1, l;
   s->primed = 0;
   for (l = 0; l < s->cfg.leg_count; ++l) {
@@ -885,19 +947,23 @@ solve:
 }
 
 SAKIN_DEF void sakin_jump_start(sakin_t* s) {
-  if (s->jump_active)
+  if (!s || s->jump_active)
     return;
   s->jump_active = 1;
   s->jump_phase = SAKIN_JUMP_SQUAT;
   s->jump_timer = 0;
 }
 
-SAKIN_DEF int sakin_jump_active(const sakin_t* s) { return s->jump_active; }
-SAKIN_DEF int sakin_jump_phase(const sakin_t* s) { return s->jump_phase; }
+SAKIN_DEF int sakin_jump_active(const sakin_t* s) { return s ? s->jump_active : 0; }
+SAKIN_DEF int sakin_jump_phase(const sakin_t* s) { return s ? s->jump_phase : SAKIN_JUMP_NONE; }
 #endif // SAKIN_NO_JUMP
 
 SAKIN_DEF void sakin_reset_pose(sakin_t* s) {
   int l;
+
+  if (!s)
+    return;
+
   for (l = 0; l < SAKIN_MAX_LEGS; ++l) {
     s->offsets[l] = sakin__vec3(0, 0, 0);
     s->prev[l] = sakin__vec3(0, 0, 0);
@@ -911,6 +977,10 @@ SAKIN_DEF void sakin_reset_pose(sakin_t* s) {
 
 SAKIN_DEF void sakin_init(sakin_t* s, const sakin_config_t* cfg) {
   int l;
+
+  if (!s)
+    return;
+
   if (cfg)
     s->cfg = *cfg;
   else
@@ -936,7 +1006,16 @@ SAKIN_DEF void sakin_init(sakin_t* s, const sakin_config_t* cfg) {
 
 SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angles_out) {
   int flags = SAKIN_IK_OK, l;
-  const sakin_config_t* c = &s->cfg;
+  const sakin_config_t* c;
+
+  if (!s || !angles_out)
+    return SAKIN_IK_BAD_CONFIG;
+
+  c = &s->cfg;
+
+  // negative time steps would run the smoothstep and jump timers backwards
+  if (dt < (sakin_real_t)0)
+    dt = (sakin_real_t)0;
 
 #ifndef SAKIN_NO_JUMP
   if (sakin__jump_update(s, dt, angles_out, &flags))
@@ -968,4 +1047,23 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
       2026-07-31  initial release: core leg IK/FK with reachability flags,
                   gait engine (ripple, ripple-left/right, amble, tripod),
                   exact body compensation, jump, C99 + C++ compatible
+*/
+
+/*
+   LICENSE - BSD Zero Clause License (0BSD)
+
+   Copyright (c) 2026 Robosarema
+
+   Permission to use, copy, modify, and/or distribute this software for any
+   purpose with or without fee is hereby granted.
+
+   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+   SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+   OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+   CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+   SPDX-License-Identifier: 0BSD
 */

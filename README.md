@@ -27,6 +27,13 @@ In **exactly one** translation unit:
 #include "sakin.h"
 ```
 
+Or, if you would rather not add the `#define` anywhere, just add the bundled
+`sakin.c` to your build - it is a one-line convenience TU that sets
+`SAKIN_IMPLEMENTATION` and includes the header. Do **one or the other**, never
+both, or you will get duplicate symbols. When you use `sakin.c`, pass
+configuration macros on the compiler command line (e.g. `-DSAKIN_MAX_LEGS=4`),
+since they must be applied before the file is read.
+
 ```c
 sakin_t bot;                       // caller-allocated, no globals
 sakin_init(&bot, NULL);            // NULL = ERIC hexapod defaults
@@ -38,15 +45,26 @@ sakin_leg_angles_t angles[SAKIN_MAX_LEGS];
 sakin_update(&bot, dt_seconds, angles);       // -> send to your servos
 ```
 
-Core-only usage (any 3-DOF leg, e.g. a quadruped or arm segment):
+Core-only usage (any 3-DOF leg, e.g. a quadruped or arm segment). This form is
+valid C **and** C++ - copied verbatim into an Arduino/ESP32 `.ino`/`.cpp` it
+compiles:
 
 ```c
 sakin_config_t cfg;
 sakin_config_default(&cfg);        // or fill by hand for your robot
 sakin_leg_angles_t a;
-int status = sakin_leg_ik(&cfg, (sakin_vec3_t){ 115.0f, 0.0f, -85.0f }, &a);
+sakin_vec3_t target;
+target.x = 115.0f; target.y = 0.0f; target.z = -85.0f;
+int status = sakin_leg_ik(&cfg, target, &a);
 if (status & SAKIN_IK_CLIPPED_WORKSPACE) { /* target out of reach */ }
 ```
+
+> Note: a C99 compound literal such as `(sakin_vec3_t){ 115.0f, 0.0f, -85.0f }`
+> is valid C but **not** valid standard C++. In C99 you can still use it; in C++
+> assign the fields as shown above.
+
+The version is available at compile time as `SAKIN_VERSION` (`"0.2.0"`) and
+`SAKIN_VERSION_MAJOR` / `_MINOR` / `_PATCH`.
 
 ## Configuration Macros
 
@@ -62,6 +80,14 @@ All geometry, joint limits, stance parameters, gait tables, deadbands, and
 jump tuning live in `sakin_config_t` - see the doc block at the top of
 `sakin.h` for frames/conventions and the theory references (Craig ch. 4;
 De Luca, *Robotics 1: Inverse kinematics*).
+
+Also available: `SAKIN_VERSION` (`"0.2.0"`) and `SAKIN_VERSION_MAJOR` /
+`_MINOR` / `_PATCH`.
+
+> `SAKIN_STATIC` gives every public function internal linkage. The flip side is
+> that functions you do not call in that translation unit trip
+> `-Wunused-function` under `-Wall -Wextra`. Either reference them (see
+> `tests/config_matrix.c`) or build with `-Wno-unused-function` for that file.
 
 ## Customizing for N Legs
 
@@ -174,9 +200,31 @@ Use this when you don't want to touch the compile-time layout.
 ## Tests
 
 ```sh
+# behaviour suite: 36 checks, 0 failures
 cc -std=c99 -Wall -Wextra -Werror -pedantic tests/test_sakin.c -lm -o test_sakin
-./test_sakin        # 25 checks, 0 failures
+./test_sakin
+
+# configuration matrix (core-only build) must compile and link
+cc -std=c99 -Wall -Wextra -Werror -pedantic \
+   -DSAKIN_NO_GAIT -DSAKIN_NO_JUMP -DSAKIN_USE_DOUBLE \
+   -DSAKIN_STATIC -DSAKIN_MAX_LEGS=4 \
+   tests/config_matrix.c -lm -o config_matrix
+./config_matrix
+
+# device defaults, same file with no macros
+cc -std=c99 -Wall -Wextra -Werror -pedantic tests/config_matrix.c -lm -o config_matrix_default
+./config_matrix_default
+
+# C++ (Arduino/ESP32) build check
+c++ -std=c++11 -Wall -Wextra -Werror tests/cpp_compile_check.cpp -lm -o cpp_compile_check
+./cpp_compile_check
 ```
 
-`tests/cpp_compile_check.cpp` verifies C++ builds (Arduino/ESP32);
-`tests/config_matrix.c` verifies the `SAKIN_*` macro combinations.
+`sakin.c` is the optional convenience implementation TU; the suite above defines
+`SAKIN_IMPLEMENTATION` itself, so do not add `sakin.c` to those builds.
+
+## License
+
+Released under the **BSD Zero Clause License (0BSD)** - use, modify, sell, and
+relicense freely, with or without attribution, and with no warranty. The full
+text is in `LICENSE` and at the bottom of `sakin.h` (SPDX: `0BSD`).
