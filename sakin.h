@@ -181,6 +181,10 @@
 
 RECENT REVISION HISTORY:
 
+      2026-11-09  v0.2.0: hardening (null/bounds guards, dt clamp,
+                  settle_time guard, SAKIN_MAX_LEGS >= 1 assert) and
+                  SAKIN_VERSION; optional sakin.c convenience TU; 0BSD license
+      2026-08-10  smoothstep gait interpolation (ease-in/out per step)
       2026-08-08  body-Z channel: sakin_body_height() + sakin_t.body_pos_z
                   (standing-height control; +z lowers the body, -z raises it)
       2026-07-31  initial release
@@ -1041,6 +1045,11 @@ SAKIN_DEF int sakin_update(sakin_t* s, sakin_real_t dt, sakin_leg_angles_t* angl
 /*
    FULL REVISION HISTORY
 
+      2026-11-09  v0.2.0: hardening (null/bounds guards, dt clamp,
+                  settle_time guard, SAKIN_MAX_LEGS >= 1 assert) and
+                  SAKIN_VERSION; optional sakin.c convenience TU; 0BSD license,
+                  full text moved to the bottom of this file
+      2026-08-10  smoothstep gait interpolation (ease-in/out per step)
       2026-08-08  body-Z channel: sakin_body_height() + sakin_t.body_pos_z;
                   foot targets in sakin_update() and the jump path gain the
                   Z translation (+z folds the legs -> body drops)
