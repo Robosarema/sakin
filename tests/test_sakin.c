@@ -1,9 +1,10 @@
-/* test_sakin.c — behaviour tests for sakin.h
+/* SPDX-License-Identifier: 0BSD */
+/* test_sakin.c - behaviour tests for sakin.h
  *
  * Covers the critical tier (100% per test-coverage standards):
  *   - leg IK/FK roundtrip over the workspace (both elbow branches)
- *   - reachability status (Craig §4.2 existence check)
- *   - inside-coxa-cylinder region (quadrant-safe atan2, Craig §4.4)
+ *   - reachability status (Craig sec. 4.2 existence check)
+ *   - inside-coxa-cylinder region (quadrant-safe atan2, Craig sec. 4.4)
  *   - degenerate config safety (never-NaN contract)
  *   - body compensation (roll/pitch/yaw), standing pose, jump lifecycle
  *   - body-Z channel (sakin_body_height): exact foot-target shift, sign
@@ -385,7 +386,7 @@ static void body_height_moves_foot_targets_exactly(void) {
   CHECK(ok, "foot targets shift by exactly +20 mm in Z (FK roundtrip)");
 }
 
-/* T3: sign direction — +z folds the legs, -z extends them */
+/* T3: sign direction - +z folds the legs, -z extends them */
 static void body_height_sign_direction(void) {
   /* Arrange */
   sakin_t bot;
