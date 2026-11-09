@@ -1,4 +1,5 @@
-// cpp_compile_check.cpp — sakin.h must compile and link as C++ (Arduino/ESP32
+// SPDX-License-Identifier: 0BSD
+// cpp_compile_check.cpp - sakin.h must compile and link as C++ (Arduino/ESP32
 // builds are C++). Also exercises the config matrix at compile time.
 //
 // Build variants (all must pass):

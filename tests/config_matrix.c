@@ -1,4 +1,5 @@
-/* config_matrix.c — compile-only check for the SAKIN_* configuration matrix.
+/* SPDX-License-Identifier: 0BSD */
+/* config_matrix.c - compile-only check for the SAKIN_* configuration matrix.
  * Uses core (Mode 1) API only, so it builds under every macro combination:
  *   -DSAKIN_NO_GAIT -DSAKIN_NO_JUMP -DSAKIN_USE_DOUBLE -DSAKIN_STATIC
  *   -DSAKIN_MAX_LEGS=4

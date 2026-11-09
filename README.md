@@ -7,15 +7,15 @@ no globals, float by default).
 
 ## Features
 
-- **Mode 1 - core kinematics** (stateless): exact geometric leg IK/FK for any
+- **Mode 1: core kinematics** (stateless): exact geometric leg IK/FK for any
   3-DOF leg, body roll/pitch/yaw compensation, reachability status flags
-  (Craig Sec.4.2 workspace-existence check instead of silent clamping)
-- **Mode 2 - gait engine** (stateful): NUKE state machine with tripod, amble,
+  (Craig Sec. 4.2 workspace-existence check instead of silent clamping)
+- **Mode 2: gait engine** (stateful): NUKE state machine with tripod, amble,
   and ripple (left/right) gaits, turn-in-place, step-boundary interpolation,
   continuous gait switching, settle-to-stand, a body-Z standing-height channel
   (`sakin_body_height`; +z lowers the body, -z raises it), and an optional
   jump behaviour
-- Runtime-configurable geometry - one header serves any robot; 
+- Runtime-configurable geometry: one header serves any robot;
   defaults included
 
 ## Quick Start
@@ -28,7 +28,7 @@ In **exactly one** translation unit:
 ```
 
 Or, if you would rather not add the `#define` anywhere, just add the bundled
-`sakin.c` to your build - it is a one-line convenience TU that sets
+`sakin.c` to your build. It is a one-line convenience TU that sets
 `SAKIN_IMPLEMENTATION` and includes the header. Do **one or the other**, never
 both, or you will get duplicate symbols. When you use `sakin.c`, pass
 configuration macros on the compiler command line (e.g. `-DSAKIN_MAX_LEGS=4`),
@@ -46,7 +46,7 @@ sakin_update(&bot, dt_seconds, angles);       // -> send to your servos
 ```
 
 Core-only usage (any 3-DOF leg, e.g. a quadruped or arm segment). This form is
-valid C **and** C++ - copied verbatim into an Arduino/ESP32 `.ino`/`.cpp` it
+valid C **and** C++. Copied verbatim into an Arduino/ESP32 `.ino`/`.cpp`, it
 compiles:
 
 ```c
@@ -60,7 +60,7 @@ if (status & SAKIN_IK_CLIPPED_WORKSPACE) { /* target out of reach */ }
 ```
 
 > Note: a C99 compound literal such as `(sakin_vec3_t){ 115.0f, 0.0f, -85.0f }`
-> is valid C but **not** valid standard C++. In C99 you can still use it; in C++
+> is valid C but **not** valid standard C++. In C99 you can still use it; in C++,
 > assign the fields as shown above.
 
 The version is available at compile time as `SAKIN_VERSION` (`"0.2.0"`) and
@@ -77,7 +77,7 @@ The version is available at compile time as `SAKIN_VERSION` (`"0.2.0"`) and
 | `SAKIN_STATIC` | Internal linkage for all public functions |
 
 All geometry, joint limits, stance parameters, gait tables, deadbands, and
-jump tuning live in `sakin_config_t` - see the doc block at the top of
+jump tuning live in `sakin_config_t`; see the doc block at the top of
 `sakin.h` for frames/conventions and the theory references (Craig ch. 4;
 De Luca, *Robotics 1: Inverse kinematics*).
 
@@ -149,7 +149,7 @@ static void my_config(sakin_config_t* c) {
 ```
 
 > NOTE: The **default gait tables are hexapod-only** (ripple/amble assume 6
-> legs). A 4-legged robot must rewrite at least one table - the trot above
+> legs). A 4-legged robot must rewrite at least one table; the trot above
 > is a complete, walkable starting point. `SAKIN_GAIT_RIPPLE`/`AMBLE` slots
 > are then just spare patterns you can fill in later.
 
@@ -195,7 +195,7 @@ Use this when you don't want to touch the compile-time layout.
 | new gait pattern | `cfg.gaits[]` | no |
 
 `SAKIN_MAX_LEGS` must be `#define`d identically in every file that includes
-`sakin.h` - mismatches silently corrupt the shared struct layout (ODR trap).
+`sakin.h`; mismatches silently corrupt the shared struct layout (ODR trap).
 
 ## Tests
 
